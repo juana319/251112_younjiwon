@@ -102,7 +102,8 @@ scene.add(ground)
 
 // Data structures for blocks
 
-const blocks = [] // array of meshes
+// blocks: array of { mesh, edges }
+const blocks = []
 
 const stackMap = new Map() // key: "x,z" -> count
 
@@ -131,7 +132,7 @@ ghost.visible = true
 scene.add(ghost)
 
 // Selection markers (visual feedback for A and B)
-const selGeo = new THREE.SphereGeometry(0.15, 12, 12)
+const selGeo = new THREE.SphereGeometry(0.12, 12, 12)
 const selMatA = new THREE.MeshStandardMaterial({ color: 0xff4444 })
 const selMatB = new THREE.MeshStandardMaterial({ color: 0x44cc44 })
 const selA = new THREE.Mesh(selGeo, selMatA)
@@ -140,6 +141,22 @@ selA.visible = false
 selB.visible = false
 scene.add(selA)
 scene.add(selB)
+
+// Wireframe edge box shown around selected vertex (12 edges)
+function createEdgeBox(size = 1, color = 0x222222) {
+  const geo = new THREE.BoxGeometry(size, size, size)
+  const edges = new THREE.EdgesGeometry(geo)
+  const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 })
+  const lines = new THREE.LineSegments(edges, mat)
+  return lines
+}
+
+const wireA = createEdgeBox(blockSize * 0.9, 0xffcc00)
+const wireB = createEdgeBox(blockSize * 0.9, 0x00ccff)
+wireA.visible = false
+wireB.visible = false
+scene.add(wireA)
+scene.add(wireB)
 
 
 
@@ -231,6 +248,66 @@ function pointerToScene(evt) {
   return null
 }
 
+// Find nearest point on the 12 edges of a box geometry
+function getNearestEdgePoint(mesh, worldPoint) {
+  const geom = mesh.geometry
+  if (!geom) return null
+  
+  // Get position attribute
+  const posAttr = geom.attributes && geom.attributes.position
+  if (!posAttr) return null
+
+  // Define the 12 edges of a box (pairs of vertex indices)
+  // Box geometry has 8 corners: (±0.5, ±0.5, ±0.5) when size=1
+  const edges = [
+    // bottom face (z = -0.5)
+    [0, 1], [1, 5], [5, 4], [4, 0],
+    // top face (z = 0.5)
+    [2, 3], [3, 7], [7, 6], [6, 2],
+    // vertical edges
+    [0, 2], [1, 3], [5, 7], [4, 6]
+  ]
+
+  const tempLocal = new THREE.Vector3()
+  const tempWorld = new THREE.Vector3()
+  const edgeStart = new THREE.Vector3()
+  const edgeEnd = new THREE.Vector3()
+  const closest = new THREE.Vector3()
+
+  let minDist = Infinity
+  let nearestPoint = null
+
+  for (const [i0, i1] of edges) {
+    // Get edge endpoints in local space
+    edgeStart.fromBufferAttribute(posAttr, i0)
+    edgeEnd.fromBufferAttribute(posAttr, i1)
+    
+    // Convert to world space
+    mesh.localToWorld(edgeStart.clone().applyMatrix4(mesh.matrixWorld).sub(mesh.position))
+    mesh.localToWorld(edgeEnd.clone().applyMatrix4(mesh.matrixWorld).sub(mesh.position))
+    
+    // Simplified: directly transform
+    const wsStart = new THREE.Vector3().copy(edgeStart).applyMatrix4(mesh.matrixWorld)
+    const wsEnd = new THREE.Vector3().copy(edgeEnd).applyMatrix4(mesh.matrixWorld)
+    
+    // Find closest point on this edge segment to worldPoint
+    const t = Math.max(0, Math.min(1, 
+      worldPoint.clone().sub(wsStart).dot(wsEnd.clone().sub(wsStart)) / 
+      wsEnd.clone().sub(wsStart).lengthSq()
+    ))
+    
+    const pt = wsStart.clone().lerp(wsEnd, t)
+    const dist = pt.distanceTo(worldPoint)
+    
+    if (dist < minDist) {
+      minDist = dist
+      nearestPoint = pt
+    }
+  }
+
+  return nearestPoint
+}
+
 
 
 function updateGhostFromPoint(point) {
@@ -279,7 +356,12 @@ function placeBlock() {
 
   scene.add(mesh)
 
-  blocks.push(mesh)
+  // add edge lines to make corners visible
+  const edges = createEdgeBox(blockSize, 0x5a3b1a)
+  edges.position.copy(mesh.position)
+  scene.add(edges)
+
+  blocks.push({ mesh, edges })
 
   // update stack map
 
@@ -307,9 +389,9 @@ function saveHistory() {
 
     blocks: blocks.map(b => ({
 
-      position: b.position.clone(),
+      position: b.mesh.position.clone(),
 
-      color: b.material.color.getHex()
+      color: b.mesh.material.color.getHex()
 
     })),
 
@@ -328,16 +410,22 @@ function updateSelectionMarkers() {
     selA.position.copy(selectState.pointA.pos)
     selA.position.y += 0.06
     selA.visible = true
+    wireA.position.copy(selectState.pointA.pos)
+    wireA.visible = true
   } else {
     selA.visible = false
+    wireA.visible = false
   }
 
   if (selectState.pointB && selectState.pointB.pos) {
     selB.position.copy(selectState.pointB.pos)
     selB.position.y += 0.06
     selB.visible = true
+    wireB.position.copy(selectState.pointB.pos)
+    wireB.visible = true
   } else {
     selB.visible = false
+    wireB.visible = false
   }
 }
 
@@ -375,7 +463,10 @@ function restoreState(state) {
 
   // Remove all blocks from scene
 
-  blocks.forEach(m => scene.remove(m))
+  blocks.forEach(b => {
+    if (b.mesh) scene.remove(b.mesh)
+    if (b.edges) scene.remove(b.edges)
+  })
 
   blocks.length = 0
 
@@ -399,7 +490,11 @@ function restoreState(state) {
 
     scene.add(mesh)
 
-    blocks.push(mesh)
+    const edges = createEdgeBox(blockSize, 0x5a3b1a)
+    edges.position.copy(mesh.position)
+    scene.add(edges)
+
+    blocks.push({ mesh, edges })
 
     increaseStack(blockData.position.x, blockData.position.z)
 
@@ -411,7 +506,10 @@ function restoreState(state) {
 
 function resetApp() {
 
-  blocks.forEach(m => scene.remove(m))
+  blocks.forEach(b => {
+    if (b.mesh) scene.remove(b.mesh)
+    if (b.edges) scene.remove(b.edges)
+  })
 
   blocks.length = 0
 
@@ -460,87 +558,39 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
 
   // left button only
 
-  if (e.button === 0) {
+  if (e.button !== 0) return
 
-    if (mode === 'create') {
-
-      placeBlock()
-
-    } else if (mode === 'select') {
-
-      const p = pointerToGround(e)
-
-      if (p) {
-
-        const gx = snap(p.x)
-
-        const gz = snap(p.z)
-
-        if (!selectState.pointA) {
-
-          selectState.pointA = { x: gx, z: gz }
-
-          updateInstructions()
-
-        } else if (!selectState.pointB) {
-
-          selectState.pointB = { x: gx, z: gz }
-
-          updateInstructions()
-          updateSelectionMarkers()
-
-          // Now we have both points, could do something with them
-
-          console.log('Selection complete:', selectState)
-
-        } else {
-
-          updateSelectionMarkers()
-          // Reset and start over
-
-          selectState.pointA = { x: gx, z: gz }
-
-          selectState.pointB = null
-
-          updateInstructions()
-
-        }
-
-      }
-
-    }
-
-    } else if (mode === 'select') {
-
-      const hit = pointerToScene(e)
-      if (hit && hit.mesh) {
-        const nearest = getNearestVertex(hit.mesh, hit.point)
-        if (nearest) {
-          if (!selectState.pointA) {
-            selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
-            updateInstructions()
-            updateSelectionMarkers()
-          } else if (!selectState.pointB) {
-            selectState.pointB = { pos: nearest.clone(), meshId: hit.mesh.id }
-            updateInstructions()
-            updateSelectionMarkers()
-            console.log('Selection complete:', selectState)
-          } else {
-            // reset and start over
-            selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
-            selectState.pointB = null
-            updateInstructions()
-            updateSelectionMarkers()
-          }
-        }
-      }
-
-    }
-
-          updateSelectionMarkers()
+  if (mode === 'create') {
+    placeBlock()
+    return
   }
 
-)
+  if (mode === 'select') {
+    const hit = pointerToScene(e)
+    if (hit && hit.mesh) {
+      const nearest = getNearestEdgePoint(hit.mesh, hit.point)
+      if (nearest) {
+        if (!selectState.pointA) {
+          selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
+          updateInstructions()
+          updateSelectionMarkers()
+        } else if (!selectState.pointB) {
+          selectState.pointB = { pos: nearest.clone(), meshId: hit.mesh.id }
+          updateInstructions()
+          updateSelectionMarkers()
+          console.log('Selection complete:', selectState)
+        } else {
+          // reset and start over
+          selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
+          selectState.pointB = null
+          updateInstructions()
+          updateSelectionMarkers()
+        }
+      }
+    }
+  }
+
+})
 
 
 
@@ -550,9 +600,12 @@ window.addEventListener('keydown', (e) => {
 
   if (e.key.toLowerCase() === 'c') {
 
-    // remove blocks
+    // remove blocks and their edge helpers
 
-    blocks.forEach((m) => scene.remove(m))
+    blocks.forEach((b) => {
+      if (b.mesh) scene.remove(b.mesh)
+      if (b.edges) scene.remove(b.edges)
+    })
 
     blocks.length = 0
 
@@ -895,11 +948,14 @@ function updateInstructions() {
 
     } else if (!selectState.pointB) {
 
-      text = `A 선택됨 (${selectState.pointA.x}, ${selectState.pointA.z}) · Click: B 끝점 선택`
+      const a = selectState.pointA.pos ? selectState.pointA.pos : selectState.pointA
+      text = `A 선택됨 (${a.x.toFixed(2)}, ${a.z.toFixed(2)}) · Click: B 끝점 선택`
 
     } else {
 
-      text = `A (${selectState.pointA.x}, ${selectState.pointA.z}) · B (${selectState.pointB.x}, ${selectState.pointB.z}) 선택됨`
+      const a = selectState.pointA.pos ? selectState.pointA.pos : selectState.pointA
+      const b = selectState.pointB.pos ? selectState.pointB.pos : selectState.pointB
+      text = `A (${a.x.toFixed(2)}, ${a.z.toFixed(2)}) · B (${b.x.toFixed(2)}, ${b.z.toFixed(2)}) 선택됨`
 
     }
 
