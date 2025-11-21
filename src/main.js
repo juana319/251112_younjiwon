@@ -158,6 +158,14 @@ wireB.visible = false
 scene.add(wireA)
 scene.add(wireB)
 
+let pathLine = null // currently drawn example path
+// thumbnail renderers and DOM elements for 사례보기
+let thumbRenderers = []
+let thumbCanvases = []
+let thumbScenes = []
+let thumbObjects = []
+let thumbsContainer = null
+
 
 
 // Helper to snap to integer grid (centered)
@@ -285,6 +293,284 @@ function getNearestVertex(mesh, worldPoint) {
 
   // Only return if within reasonable snapping distance
   return minDist < 0.3 ? nearestPoint : null
+}
+
+
+// --- Manhattan distance pathfinding ---
+// Snap a 3D point to nearest grid vertex (integer x,y,z)
+function snapToGridVertex(v) {
+  return new THREE.Vector3(
+    Math.round(v.x),
+    Math.round(v.y),
+    Math.round(v.z)
+  )
+}
+
+// Convert grid coords to key
+function gridKey(x, y, z) {
+  return `${x},${y},${z}`
+}
+
+// Compute shortest path count using combinatorics
+// Path count = (|dx| + |dy| + |dz|)! / (|dx|! * |dy|! * |dz|!)
+function multinomial(dx, dy, dz) {
+  const total = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
+  if (total === 0) return 1
+  
+  // Calculate factorial
+  const factorial = (n) => {
+    let result = 1
+    for (let i = 2; i <= n; i++) result *= i
+    return result
+  }
+  
+  return factorial(total) / (factorial(Math.abs(dx)) * factorial(Math.abs(dy)) * factorial(Math.abs(dz)))
+}
+
+function computePathCounts() {
+  if (!selectState.pointA || !selectState.pointB) return null
+  
+  const a = snapToGridVertex(selectState.pointA.pos)
+  const b = snapToGridVertex(selectState.pointB.pos)
+  
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const dz = b.z - a.z
+  
+  const distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
+  const count = multinomial(dx, dy, dz)
+  
+  console.log('A (snapped):', a, 'B (snapped):', b, 'Distance:', distance, 'Count:', count)
+  
+  return { distance, count, dx, dy, dz, aGrid: a, bGrid: b }
+}
+
+// Generate one example shortest path
+function computeOneExamplePath() {
+  if (!selectState.pointA || !selectState.pointB) return null
+  
+  const a = snapToGridVertex(selectState.pointA.pos)
+  const b = snapToGridVertex(selectState.pointB.pos)
+  
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const dz = b.z - a.z
+  
+  const path = [a.clone()]
+  let current = a.clone()
+  
+  // Move in order: x first, then y, then z (arbitrary but deterministic)
+  const steps = []
+  if (dx > 0) for (let i = 0; i < dx; i++) steps.push([1, 0, 0])
+  if (dx < 0) for (let i = 0; i < Math.abs(dx); i++) steps.push([-1, 0, 0])
+  if (dy > 0) for (let i = 0; i < dy; i++) steps.push([0, 1, 0])
+  if (dy < 0) for (let i = 0; i < Math.abs(dy); i++) steps.push([0, -1, 0])
+  if (dz > 0) for (let i = 0; i < dz; i++) steps.push([0, 0, 1])
+  if (dz < 0) for (let i = 0; i < Math.abs(dz); i++) steps.push([0, 0, -1])
+  
+  for (const [sx, sy, sz] of steps) {
+    current = new THREE.Vector3(current.x + sx, current.y + sy, current.z + sz)
+    path.push(current.clone())
+  }
+  
+  return path
+}
+
+// Generate ALL shortest paths (recursive backtracking)
+function generateAllShortestPaths() {
+  if (!selectState.pointA || !selectState.pointB) return []
+  
+  const a = snapToGridVertex(selectState.pointA.pos)
+  const b = snapToGridVertex(selectState.pointB.pos)
+  
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const dz = b.z - a.z
+  
+  // Generate all permutations of moves
+  const moves = []
+  for (let i = 0; i < Math.abs(dx); i++) moves.push([Math.sign(dx), 0, 0])
+  for (let i = 0; i < Math.abs(dy); i++) moves.push([0, Math.sign(dy), 0])
+  for (let i = 0; i < Math.abs(dz); i++) moves.push([0, 0, Math.sign(dz)])
+  
+  // Generate unique permutations
+  const permutations = []
+  const used = new Array(moves.length).fill(false)
+  
+  function backtrack(perm) {
+    if (perm.length === moves.length) {
+      permutations.push([...perm])
+      return
+    }
+    for (let i = 0; i < moves.length; i++) {
+      if (!used[i]) {
+        used[i] = true
+        perm.push(moves[i])
+        backtrack(perm)
+        perm.pop()
+        used[i] = false
+      }
+    }
+  }
+  
+  backtrack([])
+  
+  // Convert permutations to paths
+  const paths = permutations.map(perm => {
+    const path = [a.clone()]
+    let current = a.clone()
+    for (const [sx, sy, sz] of perm) {
+      current = new THREE.Vector3(current.x + sx, current.y + sy, current.z + sz)
+      path.push(current.clone())
+    }
+    return path
+  })
+  
+  return paths
+}
+
+
+function showPathLine(path) {
+  // clear previous group
+  if (pathLine) {
+    scene.remove(pathLine)
+    // dispose children geometries/materials
+    pathLine.traverse((c) => {
+      if (c.geometry) c.geometry.dispose()
+      if (c.material) c.material.dispose()
+    })
+    pathLine = null
+  }
+
+  const group = new THREE.Group()
+
+  // create a smooth curve and tube for thickness
+  const curve = new THREE.CatmullRomCurve3(path)
+  const segments = Math.max(path.length * 8, 32)
+  const tubeGeo = new THREE.TubeGeometry(curve, segments, 0.08, 8, false)
+  const tubeMat = new THREE.MeshBasicMaterial({ color: 0xffff00 })
+  const tube = new THREE.Mesh(tubeGeo, tubeMat)
+  group.add(tube)
+
+  // Add A and B markers
+  const sphGeo = new THREE.SphereGeometry(0.12, 12, 12)
+  const sphA = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0xff0000 }))
+  const sphB = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00 }))
+  sphA.position.copy(path[0])
+  sphB.position.copy(path[path.length - 1])
+  group.add(sphA)
+  group.add(sphB)
+
+  pathLine = group
+  scene.add(pathLine)
+}
+
+// Visualize all paths in a grid layout
+let pathVisuals = [] // store created visuals for cleanup
+
+function showAllPathsGrid(paths) {
+  // remove any previous thumbnails
+  if (thumbsContainer) {
+    thumbRenderers.forEach(r => {
+      try { r.forceContextLoss && r.forceContextLoss() } catch(e) {}
+    })
+    thumbRenderers = []
+    thumbCanvases.forEach(c => c.remove())
+    thumbCanvases = []
+    thumbScenes = []
+    thumbObjects = []
+    thumbsContainer.remove()
+    thumbsContainer = null
+  }
+
+  if (!paths || paths.length === 0) return
+
+  // create container DOM
+  thumbsContainer = document.createElement('div')
+  thumbsContainer.style.position = 'absolute'
+  thumbsContainer.style.bottom = '8px'
+  thumbsContainer.style.right = '8px'
+  thumbsContainer.style.maxHeight = '40vh'
+  thumbsContainer.style.overflow = 'auto'
+  thumbsContainer.style.display = 'grid'
+  const cols = Math.ceil(Math.sqrt(paths.length))
+  thumbsContainer.style.gridTemplateColumns = `repeat(${cols}, 220px)`
+  thumbsContainer.style.gap = '8px'
+  container.appendChild(thumbsContainer)
+
+  const colors = [
+    0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff,
+    0xff6600, 0x00ff99, 0x6600ff, 0xffcc00, 0xff0099, 0x00ccff
+  ]
+
+  paths.forEach((path, idx) => {
+    const w = 220, h = 160
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    canvas.style.width = w + 'px'
+    canvas.style.height = h + 'px'
+    canvas.style.background = '#222'
+    canvas.style.borderRadius = '6px'
+    canvas.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)'
+    thumbsContainer.appendChild(canvas)
+    thumbCanvases.push(canvas)
+
+    // renderer
+    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
+    r.setSize(w, h)
+    r.setPixelRatio(1)
+    thumbRenderers.push(r)
+
+    // mini scene
+    const s = new THREE.Scene()
+    s.background = new THREE.Color(0x000000)
+    thumbScenes.push(s)
+
+    // camera
+    const cam = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000)
+    cam.position.set(3, 3, 6)
+    cam.lookAt(0, 0, 0)
+
+    // lights
+    s.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.8))
+    const dl = new THREE.DirectionalLight(0xffffff, 0.6)
+    dl.position.set(5, 10, 7)
+    s.add(dl)
+
+    // semitransparent blocks (scaled down)
+    blocks.forEach(b => {
+      const geo = new THREE.BoxGeometry(blockSize * 0.6, blockSize * 0.6, blockSize * 0.6)
+      const mat = new THREE.MeshStandardMaterial({ color: 0xff8f00, transparent: true, opacity: 0.35 })
+      const m = new THREE.Mesh(geo, mat)
+      m.position.copy(b.mesh.position)
+      m.position.multiplyScalar(0.6)
+      s.add(m)
+      thumbObjects.push(m)
+    })
+
+    // create tube path
+    const pts = path.map(p => new THREE.Vector3(p.x * 0.6, p.y * 0.6, p.z * 0.6))
+    const curve = new THREE.CatmullRomCurve3(pts)
+    const tubeGeo = new THREE.TubeGeometry(curve, Math.max(pts.length * 6, 24), 0.08, 8, false)
+    const tubeMat = new THREE.MeshBasicMaterial({ color: colors[idx % colors.length] })
+    const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat)
+    s.add(tubeMesh)
+    thumbObjects.push(tubeMesh)
+
+    // A/B markers
+    const sphGeo = new THREE.SphereGeometry(0.12, 12, 12)
+    const aMesh = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0xff0000 }))
+    const bMesh = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00 }))
+    aMesh.position.copy(pts[0])
+    bMesh.position.copy(pts[pts.length - 1])
+    s.add(aMesh)
+    s.add(bMesh)
+    thumbObjects.push(aMesh, bMesh)
+
+    // render once
+    r.render(s, cam)
+  })
 }
 
 
@@ -573,6 +859,20 @@ function resetApp() {
   updateInstructions()
   updateSelectionMarkers()
 
+  // remove any thumbnail visuals and renderers
+  if (thumbsContainer) {
+    thumbRenderers.forEach(r => {
+      try { r.forceContextLoss && r.forceContextLoss() } catch (e) {}
+    })
+    thumbRenderers = []
+    thumbCanvases.forEach(c => c.remove())
+    thumbCanvases = []
+    thumbScenes = []
+    thumbObjects = []
+    thumbsContainer.remove()
+    thumbsContainer = null
+  }
+
 }
 
 
@@ -717,7 +1017,9 @@ instr.style.left = '8px'
 
 instr.style.padding = '6px 10px'
 
-instr.style.background = 'rgba(255,255,255,0.8)'
+instr.style.background = 'rgba(0,0,0,0.7)'
+
+instr.style.color = '#ffffff'
 
 instr.style.borderRadius = '6px'
 
@@ -954,6 +1256,70 @@ actionButtons.appendChild(resetBtn)
 controlPanel.appendChild(actionButtons)
 
 container.appendChild(controlPanel)
+
+// Result area for path counts / examples
+const resultBox = document.createElement('div')
+resultBox.id = 'result-box'
+resultBox.style.position = 'absolute'
+resultBox.style.bottom = '8px'
+resultBox.style.left = '8px'
+resultBox.style.padding = '8px 10px'
+resultBox.style.background = 'rgba(0,0,0,0.7)'
+resultBox.style.color = '#ffffff'
+resultBox.style.borderRadius = '6px'
+resultBox.style.fontFamily = 'Arial, sans-serif'
+resultBox.style.fontSize = '13px'
+resultBox.style.maxWidth = '320px'
+resultBox.style.overflowWrap = 'break-word'
+resultBox.innerHTML = '경로 결과가 여기에 표시됩니다.'
+container.appendChild(resultBox)
+
+// Add path action buttons
+const pathButtons = document.createElement('div')
+pathButtons.style.display = 'flex'
+pathButtons.style.gap = '6px'
+pathButtons.style.marginTop = '6px'
+
+const countBtn = document.createElement('button')
+countBtn.textContent = '경우의 수 구하기'
+countBtn.style.padding = '6px 10px'
+countBtn.style.borderRadius = '4px'
+countBtn.style.border = 'none'
+countBtn.style.cursor = 'pointer'
+countBtn.style.backgroundColor = '#4CAF50'
+countBtn.style.color = 'white'
+countBtn.addEventListener('click', () => {
+  const res = computePathCounts()
+  if (res === null) {
+    resultBox.innerHTML = 'A 또는 B가 선택되지 않았습니다.'
+  } else {
+    const countNum = Math.floor(res.count)
+    resultBox.innerHTML = `<strong>최단거리 경우의 수는 ${countNum}가지입니다.</strong><br/>A: (${res.aGrid.x}, ${res.aGrid.y}, ${res.aGrid.z}) → B: (${res.bGrid.x}, ${res.bGrid.y}, ${res.bGrid.z})<br/>최단 거리: ${res.distance}`
+  }
+})
+
+const exampleBtn = document.createElement('button')
+exampleBtn.textContent = '사례보기'
+exampleBtn.style.padding = '6px 10px'
+exampleBtn.style.borderRadius = '4px'
+exampleBtn.style.border = 'none'
+exampleBtn.style.cursor = 'pointer'
+exampleBtn.style.backgroundColor = '#FF9800'
+exampleBtn.style.color = 'white'
+exampleBtn.addEventListener('click', () => {
+  const paths = generateAllShortestPaths()
+  if (!paths || paths.length === 0) {
+    resultBox.innerHTML = '경로를 찾을 수 없습니다. A/B를 확인하세요.'
+  } else {
+    const res = computePathCounts()
+    resultBox.innerHTML = `<strong>${paths.length}가지 경로를 시각화했습니다.</strong>`
+    showAllPathsGrid(paths)
+  }
+})
+
+pathButtons.appendChild(countBtn)
+pathButtons.appendChild(exampleBtn)
+controlPanel.appendChild(pathButtons)
 
 
 
