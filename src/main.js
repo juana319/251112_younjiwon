@@ -242,14 +242,16 @@ function pointerToScene(evt) {
     let mesh = obj
     while (mesh && !mesh.geometry && mesh.parent) mesh = mesh.parent
     if (mesh && mesh.geometry) {
+      // only allow selecting actual box meshes (our blocks)
+      if (mesh.geometry.type !== 'BoxGeometry') continue
       return { point: it.point, mesh }
     }
   }
   return null
 }
 
-// Find nearest point on the 12 edges of a box geometry
-function getNearestEdgePoint(mesh, worldPoint) {
+// Find nearest vertex (8 corners) of a box geometry
+function getNearestVertex(mesh, worldPoint) {
   const geom = mesh.geometry
   if (!geom) return null
   
@@ -257,55 +259,32 @@ function getNearestEdgePoint(mesh, worldPoint) {
   const posAttr = geom.attributes && geom.attributes.position
   if (!posAttr) return null
 
-  // Define the 12 edges of a box (pairs of vertex indices)
-  // Box geometry has 8 corners: (±0.5, ±0.5, ±0.5) when size=1
-  const edges = [
-    // bottom face (z = -0.5)
-    [0, 1], [1, 5], [5, 4], [4, 0],
-    // top face (z = 0.5)
-    [2, 3], [3, 7], [7, 6], [6, 2],
-    // vertical edges
-    [0, 2], [1, 3], [5, 7], [4, 6]
-  ]
-
-  const tempLocal = new THREE.Vector3()
-  const tempWorld = new THREE.Vector3()
-  const edgeStart = new THREE.Vector3()
-  const edgeEnd = new THREE.Vector3()
-  const closest = new THREE.Vector3()
+  // Box geometry has 8 vertices (corners)
+  // Indices: 0-7 represent the 8 corners
+  const vertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
 
   let minDist = Infinity
   let nearestPoint = null
 
-  for (const [i0, i1] of edges) {
-    // Get edge endpoints in local space
-    edgeStart.fromBufferAttribute(posAttr, i0)
-    edgeEnd.fromBufferAttribute(posAttr, i1)
+  for (const i of vertexIndices) {
+    // Get vertex in local space
+    const vertex = new THREE.Vector3()
+    vertex.fromBufferAttribute(posAttr, i)
     
     // Convert to world space
-    mesh.localToWorld(edgeStart.clone().applyMatrix4(mesh.matrixWorld).sub(mesh.position))
-    mesh.localToWorld(edgeEnd.clone().applyMatrix4(mesh.matrixWorld).sub(mesh.position))
+    const wsVertex = vertex.applyMatrix4(mesh.matrixWorld)
     
-    // Simplified: directly transform
-    const wsStart = new THREE.Vector3().copy(edgeStart).applyMatrix4(mesh.matrixWorld)
-    const wsEnd = new THREE.Vector3().copy(edgeEnd).applyMatrix4(mesh.matrixWorld)
-    
-    // Find closest point on this edge segment to worldPoint
-    const t = Math.max(0, Math.min(1, 
-      worldPoint.clone().sub(wsStart).dot(wsEnd.clone().sub(wsStart)) / 
-      wsEnd.clone().sub(wsStart).lengthSq()
-    ))
-    
-    const pt = wsStart.clone().lerp(wsEnd, t)
-    const dist = pt.distanceTo(worldPoint)
+    // Calculate distance from worldPoint
+    const dist = wsVertex.distanceTo(worldPoint)
     
     if (dist < minDist) {
       minDist = dist
-      nearestPoint = pt
+      nearestPoint = wsVertex.clone()
     }
   }
 
-  return nearestPoint
+  // Only return if within reasonable snapping distance
+  return minDist < 0.3 ? nearestPoint : null
 }
 
 
@@ -371,38 +350,89 @@ function placeBlock() {
 
   increaseStack(x, z)
 
-  saveHistory()
+  // record action (store primitives for replay)
+  pushAction({
+    type: 'place',
+    position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+    color: mesh.material.color.getHex()
+  })
 
 }
 
 
 
-function saveHistory() {
-
-  // Remove any future history if we're not at the end
-
+// Action-based history: each action is a single step (place/select/etc.)
+function pushAction(action) {
+  // truncate future
   history.length = historyIndex + 1
+  history.push(action)
+  historyIndex++
+}
 
-  // Save current state
+function applyAction(action) {
+  if (!action) return
+  if (action.type === 'place') {
+    const pos = action.position
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(blockSize, blockSize, blockSize),
+      new THREE.MeshStandardMaterial({ color: action.color })
+    )
+    mesh.position.set(pos.x, pos.y, pos.z)
+    scene.add(mesh)
+    const edges = createEdgeBox(blockSize, 0x5a3b1a)
+    edges.position.copy(mesh.position)
+    scene.add(edges)
+    blocks.push({ mesh, edges })
+    increaseStack(mesh.position.x, mesh.position.z)
+  } else if (action.type === 'select') {
+    // set selectState exactly as stored
+    const ss = action.selectState || { pointA: null, pointB: null }
+    selectState = { pointA: null, pointB: null }
+    if (ss.pointA) selectState.pointA = { pos: new THREE.Vector3(ss.pointA.x, ss.pointA.y, ss.pointA.z), meshId: ss.pointA.meshId }
+    if (ss.pointB) selectState.pointB = { pos: new THREE.Vector3(ss.pointB.x, ss.pointB.y, ss.pointB.z), meshId: ss.pointB.meshId }
+    mode = action.mode || mode
+    updateSelectionMarkers()
+    updateModeUI()
+    updateInstructions()
+  } else if (action.type === 'clear') {
+    // clear all blocks
+    blocks.forEach(b => {
+      if (b.mesh) scene.remove(b.mesh)
+      if (b.edges) scene.remove(b.edges)
+    })
+    blocks.length = 0
+    stackMap.clear()
+  } else if (action.type === 'reset') {
+    // reset selection and mode
+    selectState = { pointA: null, pointB: null }
+    mode = 'create'
+    updateSelectionMarkers()
+    updateModeUI()
+    updateInstructions()
+  }
+}
 
-  const state = {
+function replayHistory(upToIndex) {
+  // clear scene blocks
+  blocks.forEach(b => {
+    if (b.mesh) scene.remove(b.mesh)
+    if (b.edges) scene.remove(b.edges)
+  })
+  blocks.length = 0
+  stackMap.clear()
 
-    blocks: blocks.map(b => ({
+  // reset selection/mode
+  selectState = { pointA: null, pointB: null }
+  mode = 'create'
 
-      position: b.mesh.position.clone(),
-
-      color: b.mesh.material.color.getHex()
-
-    })),
-
-    stackMap: new Map(stackMap)
-
+  // apply actions from 0..upToIndex
+  for (let i = 0; i <= upToIndex; i++) {
+    applyAction(history[i])
   }
 
-  history.push(state)
-
-  historyIndex++
-
+  updateSelectionMarkers()
+  updateModeUI()
+  updateInstructions()
 }
 
 function updateSelectionMarkers() {
@@ -433,12 +463,21 @@ function updateSelectionMarkers() {
 
 function undo() {
 
-  if (historyIndex > 0) {
-
+  if (historyIndex >= 0) {
     historyIndex--
-
-    restoreState(history[historyIndex])
-
+    if (historyIndex >= 0) {
+      replayHistory(historyIndex)
+    } else {
+      // cleared all actions -> empty scene
+      blocks.forEach(b => { if (b.mesh) scene.remove(b.mesh); if (b.edges) scene.remove(b.edges) })
+      blocks.length = 0
+      stackMap.clear()
+      selectState = { pointA: null, pointB: null }
+      mode = 'create'
+      updateSelectionMarkers()
+      updateModeUI()
+      updateInstructions()
+    }
   }
 
 }
@@ -448,11 +487,8 @@ function undo() {
 function redo() {
 
   if (historyIndex < history.length - 1) {
-
     historyIndex++
-
-    restoreState(history[historyIndex])
-
+    replayHistory(historyIndex)
   }
 
 }
@@ -499,6 +535,17 @@ function restoreState(state) {
     increaseStack(blockData.position.x, blockData.position.z)
 
   })
+  
+  // Restore selection state and mode
+  mode = state.mode || 'create'
+  selectState = state.selectState ? {
+    pointA: state.selectState.pointA ? { pos: state.selectState.pointA.pos.clone(), meshId: state.selectState.pointA.meshId } : null,
+    pointB: state.selectState.pointB ? { pos: state.selectState.pointB.pos.clone(), meshId: state.selectState.pointB.meshId } : null
+  } : { pointA: null, pointB: null }
+  
+  updateModeUI()
+  updateInstructions()
+  updateSelectionMarkers()
 
 }
 
@@ -568,14 +615,25 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   if (mode === 'select') {
     const hit = pointerToScene(e)
     if (hit && hit.mesh) {
-      const nearest = getNearestEdgePoint(hit.mesh, hit.point)
+      const nearest = getNearestVertex(hit.mesh, hit.point)
       if (nearest) {
         if (!selectState.pointA) {
           selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
+          // push select action (store primitives)
+          pushAction({
+            type: 'select',
+            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
+            mode: mode
+          })
           updateInstructions()
           updateSelectionMarkers()
         } else if (!selectState.pointB) {
           selectState.pointB = { pos: nearest.clone(), meshId: hit.mesh.id }
+          pushAction({
+            type: 'select',
+            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: { x: selectState.pointB.pos.x, y: selectState.pointB.pos.y, z: selectState.pointB.pos.z, meshId: selectState.pointB.meshId } },
+            mode: mode
+          })
           updateInstructions()
           updateSelectionMarkers()
           console.log('Selection complete:', selectState)
@@ -583,6 +641,11 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
           // reset and start over
           selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
           selectState.pointB = null
+          pushAction({
+            type: 'select',
+            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
+            mode: mode
+          })
           updateInstructions()
           updateSelectionMarkers()
         }
