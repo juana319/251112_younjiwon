@@ -296,135 +296,153 @@ function getNearestVertex(mesh, worldPoint) {
 }
 
 
-// --- Manhattan distance pathfinding ---
-// Snap a 3D point to nearest grid vertex (integer x,y,z)
-function snapToGridVertex(v) {
-  return new THREE.Vector3(
-    Math.round(v.x),
-    Math.round(v.y),
-    Math.round(v.z)
-  )
+// --- Block-edge-based pathfinding ---
+function posKey(v) {
+  return `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`
 }
 
-// Convert grid coords to key
-function gridKey(x, y, z) {
-  return `${x},${y},${z}`
-}
+function buildBlockEdgeGraph() {
+  const nodes = new Map()
+  const adj = new Map()
 
-// Compute shortest path count using combinatorics
-// Path count = (|dx| + |dy| + |dz|)! / (|dx|! * |dy|! * |dz|!)
-function multinomial(dx, dy, dz) {
-  const total = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
-  if (total === 0) return 1
-  
-  // Calculate factorial
-  const factorial = (n) => {
-    let result = 1
-    for (let i = 2; i <= n; i++) result *= i
-    return result
+  const offsets = [
+    new THREE.Vector3(-0.5, -0.5, -0.5),
+    new THREE.Vector3(0.5, -0.5, -0.5),
+    new THREE.Vector3(-0.5, 0.5, -0.5),
+    new THREE.Vector3(0.5, 0.5, -0.5),
+    new THREE.Vector3(-0.5, -0.5, 0.5),
+    new THREE.Vector3(0.5, -0.5, 0.5),
+    new THREE.Vector3(-0.5, 0.5, 0.5),
+    new THREE.Vector3(0.5, 0.5, 0.5)
+  ]
+
+  const edges = [
+    [0,1],[1,3],[3,2],[2,0],
+    [4,5],[5,7],[7,6],[6,4],
+    [0,4],[1,5],[2,6],[3,7]
+  ]
+
+  for (const b of blocks) {
+    const c = b.mesh.position
+    const corners = offsets.map(o => new THREE.Vector3(c.x + o.x * blockSize, c.y + o.y * blockSize, c.z + o.z * blockSize))
+    const keys = corners.map(v => posKey(v))
+    
+    for (let i = 0; i < corners.length; i++) {
+      const k = keys[i]
+      if (!nodes.has(k)) nodes.set(k, corners[i].clone())
+      if (!adj.has(k)) adj.set(k, new Set())
+    }
+    
+    for (const [i0, i1] of edges) {
+      const k0 = keys[i0]
+      const k1 = keys[i1]
+      adj.get(k0).add(k1)
+      adj.get(k1).add(k0)
+    }
   }
-  
-  return factorial(total) / (factorial(Math.abs(dx)) * factorial(Math.abs(dy)) * factorial(Math.abs(dz)))
+
+  return { nodes, adj }
 }
 
 function computePathCounts() {
   if (!selectState.pointA || !selectState.pointB) return null
   
-  const a = snapToGridVertex(selectState.pointA.pos)
-  const b = snapToGridVertex(selectState.pointB.pos)
+  const graph = buildBlockEdgeGraph()
+  const startKey = posKey(selectState.pointA.pos)
+  const endKey = posKey(selectState.pointB.pos)
   
-  const dx = b.x - a.x
-  const dy = b.y - a.y
-  const dz = b.z - a.z
-  
-  const distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
-  const count = multinomial(dx, dy, dz)
-  
-  console.log('A (snapped):', a, 'B (snapped):', b, 'Distance:', distance, 'Count:', count)
-  
-  return { distance, count, dx, dy, dz, aGrid: a, bGrid: b }
-}
-
-// Generate one example shortest path
-function computeOneExamplePath() {
-  if (!selectState.pointA || !selectState.pointB) return null
-  
-  const a = snapToGridVertex(selectState.pointA.pos)
-  const b = snapToGridVertex(selectState.pointB.pos)
-  
-  const dx = b.x - a.x
-  const dy = b.y - a.y
-  const dz = b.z - a.z
-  
-  const path = [a.clone()]
-  let current = a.clone()
-  
-  // Move in order: x first, then y, then z (arbitrary but deterministic)
-  const steps = []
-  if (dx > 0) for (let i = 0; i < dx; i++) steps.push([1, 0, 0])
-  if (dx < 0) for (let i = 0; i < Math.abs(dx); i++) steps.push([-1, 0, 0])
-  if (dy > 0) for (let i = 0; i < dy; i++) steps.push([0, 1, 0])
-  if (dy < 0) for (let i = 0; i < Math.abs(dy); i++) steps.push([0, -1, 0])
-  if (dz > 0) for (let i = 0; i < dz; i++) steps.push([0, 0, 1])
-  if (dz < 0) for (let i = 0; i < Math.abs(dz); i++) steps.push([0, 0, -1])
-  
-  for (const [sx, sy, sz] of steps) {
-    current = new THREE.Vector3(current.x + sx, current.y + sy, current.z + sz)
-    path.push(current.clone())
+  if (!graph.nodes.has(startKey) || !graph.nodes.has(endKey)) {
+    return { distance: Infinity, count: 0, aGrid: selectState.pointA.pos, bGrid: selectState.pointB.pos }
   }
+
+  const dist = new Map()
+  const count = new Map()
+  const q = []
+  dist.set(startKey, 0)
+  count.set(startKey, 1)
+  q.push(startKey)
+
+  while (q.length) {
+    const u = q.shift()
+    const d = dist.get(u)
+    const neighbors = graph.adj.get(u) || new Set()
+    for (const v of neighbors) {
+      if (!dist.has(v)) {
+        dist.set(v, d + 1)
+        count.set(v, count.get(u))
+        q.push(v)
+      } else if (dist.get(v) === d + 1) {
+        count.set(v, count.get(v) + count.get(u))
+      }
+    }
+  }
+
+  const distance = dist.get(endKey) === undefined ? Infinity : dist.get(endKey)
+  const pathCount = count.get(endKey) || 0
   
-  return path
+  return { distance, count: pathCount, aGrid: selectState.pointA.pos, bGrid: selectState.pointB.pos }
 }
 
-// Generate ALL shortest paths (recursive backtracking)
 function generateAllShortestPaths() {
   if (!selectState.pointA || !selectState.pointB) return []
+  
+  const graph = buildBlockEdgeGraph()
+  const startKey = posKey(selectState.pointA.pos)
+  const endKey = posKey(selectState.pointB.pos)
+  
+  if (!graph.nodes.has(startKey) || !graph.nodes.has(endKey)) {
+    console.log('Start or end not in graph')
+    return []
+  }
 
-  const a = snapToGridVertex(selectState.pointA.pos)
-  const b = snapToGridVertex(selectState.pointB.pos)
+  // BFS to find shortest distance
+  const dist = new Map()
+  const q = []
+  dist.set(startKey, 0)
+  q.push(startKey)
 
-  const dx = b.x - a.x
-  const dy = b.y - a.y
-  const dz = b.z - a.z
-
-  const sx = Math.sign(dx)
-  const sy = Math.sign(dy)
-  const sz = Math.sign(dz)
-
-  const nx = Math.abs(dx)
-  const ny = Math.abs(dy)
-  const nz = Math.abs(dz)
-
-  // Backtracking by remaining counts (multiset permutations) to produce exactly multinomial(nx,ny,nz) unique paths
-  const paths = []
-
-  function build(path, rx, ry, rz) {
-    if (rx === 0 && ry === 0 && rz === 0) {
-      paths.push(path.map(p => p.clone()))
-      return
-    }
-    if (rx > 0) {
-      const last = path[path.length - 1]
-      path.push(new THREE.Vector3(last.x + sx, last.y, last.z))
-      build(path, rx - 1, ry, rz)
-      path.pop()
-    }
-    if (ry > 0) {
-      const last = path[path.length - 1]
-      path.push(new THREE.Vector3(last.x, last.y + sy, last.z))
-      build(path, rx, ry - 1, rz)
-      path.pop()
-    }
-    if (rz > 0) {
-      const last = path[path.length - 1]
-      path.push(new THREE.Vector3(last.x, last.y, last.z + sz))
-      build(path, rx, ry, rz - 1)
-      path.pop()
+  while (q.length) {
+    const u = q.shift()
+    const d = dist.get(u)
+    const neighbors = graph.adj.get(u) || new Set()
+    for (const v of neighbors) {
+      if (!dist.has(v)) {
+        dist.set(v, d + 1)
+        q.push(v)
+      }
     }
   }
 
-  build([a.clone()], nx, ny, nz)
-  return paths
+  const targetDist = dist.get(endKey)
+  if (targetDist === undefined) {
+    console.log('No path found')
+    return []
+  }
+
+  console.log('Shortest distance:', targetDist)
+
+  // Backtrack all shortest paths
+  const allPaths = []
+
+  function backtrack(path, currentKey) {
+    if (currentKey === endKey) {
+      allPaths.push(path.map(k => graph.nodes.get(k).clone()))
+      return
+    }
+    const d = dist.get(currentKey)
+    const neighbors = graph.adj.get(currentKey) || new Set()
+    for (const nk of neighbors) {
+      if (dist.get(nk) === d + 1) {
+        path.push(nk)
+        backtrack(path, nk)
+        path.pop()
+      }
+    }
+  }
+
+  backtrack([startKey], startKey)
+  console.log('Generated paths:', allPaths.length)
+  return allPaths
 }
 
 
@@ -492,25 +510,85 @@ function showAllPathsGrid(paths) {
   thumbsContainer.style.height = '100%'
   thumbsContainer.style.background = '#ffffff' // white background
   thumbsContainer.style.zIndex = '9999'
-  thumbsContainer.style.display = 'grid'
-  thumbsContainer.style.gridAutoRows = 'min-content'
-  thumbsContainer.style.justifyContent = 'center'
-  thumbsContainer.style.alignContent = 'start' // align from top
-  thumbsContainer.style.padding = '24px'
   thumbsContainer.style.overflow = 'auto'
-  const cols = Math.ceil(Math.sqrt(paths.length))
-  thumbsContainer.style.gridTemplateColumns = `repeat(${cols}, minmax(200px, 1fr))`
-  thumbsContainer.style.gap = '12px'
+  thumbsContainer.style.padding = '24px'
   document.body.appendChild(thumbsContainer)
+
+  // header with title and button
+  const header = document.createElement('div')
+  header.style.display = 'flex'
+  header.style.justifyContent = 'space-between'
+  header.style.alignItems = 'center'
+  header.style.marginBottom = '20px'
+  header.style.padding = '0 8px'
+
+  const title = document.createElement('h2')
+  title.textContent = `최단 경로 사례 (총 ${paths.length}개)`
+  title.style.margin = '0'
+  title.style.fontSize = '24px'
+  title.style.fontWeight = 'bold'
+  title.style.color = '#333'
+  header.appendChild(title)
+
+  const closeBtn = document.createElement('button')
+  closeBtn.textContent = '도형 만들러 가기'
+  closeBtn.style.padding = '12px 24px'
+  closeBtn.style.fontSize = '16px'
+  closeBtn.style.fontWeight = 'bold'
+  closeBtn.style.background = '#4CAF50'
+  closeBtn.style.color = 'white'
+  closeBtn.style.border = 'none'
+  closeBtn.style.borderRadius = '6px'
+  closeBtn.style.cursor = 'pointer'
+  closeBtn.style.transition = 'background 0.3s'
+  closeBtn.onmouseover = () => closeBtn.style.background = '#45a049'
+  closeBtn.onmouseout = () => closeBtn.style.background = '#4CAF50'
+  closeBtn.onclick = () => {
+    if (thumbsContainer) {
+      thumbRenderers.forEach(r => {
+        try { r.forceContextLoss && r.forceContextLoss() } catch(e) {}
+      })
+      thumbRenderers = []
+      thumbCanvases.forEach(c => c.remove())
+      thumbCanvases = []
+      thumbScenes = []
+      thumbObjects = []
+      thumbsContainer.remove()
+      thumbsContainer = null
+      // Restore main renderer
+      renderer.render(scene, camera)
+    }
+  }
+  header.appendChild(closeBtn)
+  thumbsContainer.appendChild(header)
+
+  // grid container for thumbnails
+  const gridContainer = document.createElement('div')
+  gridContainer.style.display = 'flex'
+  gridContainer.style.flexWrap = 'wrap'
+  gridContainer.style.gap = '12px'
+  gridContainer.style.justifyContent = 'flex-start'
+  gridContainer.style.alignItems = 'flex-start'
+  thumbsContainer.appendChild(gridContainer)
 
   const colors = [
     0xff0000, 0x00aa00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ccff,
     0xff6600, 0x00aaff, 0x6600ff, 0xffcc00, 0xff0099, 0x0099cc
   ]
 
+  console.log('Total paths to render:', paths.length)
+  
+  // Create single shared renderer
+  const sharedCanvas = document.createElement('canvas')
+  const w = 250
+  const h = 200
+  sharedCanvas.width = w
+  sharedCanvas.height = h
+  const sharedRenderer = new THREE.WebGLRenderer({ canvas: sharedCanvas, antialias: true, alpha: false, preserveDrawingBuffer: true })
+  sharedRenderer.setSize(w, h)
+  sharedRenderer.setPixelRatio(1)
+  
   paths.forEach((path, idx) => {
-    const w = Math.min(420, Math.floor(window.innerWidth / cols) - 32)
-    const h = Math.floor(w * 0.66)
     const canvas = document.createElement('canvas')
     canvas.width = w
     canvas.height = h
@@ -519,14 +597,9 @@ function showAllPathsGrid(paths) {
     canvas.style.background = '#ffffff'
     canvas.style.border = '1px solid #ddd'
     canvas.style.borderRadius = '6px'
-    thumbsContainer.appendChild(canvas)
+    canvas.style.flexShrink = '0'
+    gridContainer.appendChild(canvas)
     thumbCanvases.push(canvas)
-
-    // renderer
-    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
-    r.setSize(w, h)
-    r.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    thumbRenderers.push(r)
 
     // mini scene
     const s = new THREE.Scene()
@@ -574,8 +647,23 @@ function showAllPathsGrid(paths) {
     s.add(bMesh)
     thumbObjects.push(aMesh, bMesh)
 
-    // render once
-    r.render(s, cam)
+    // Store camera with scene
+    s.userData.camera = cam
+    s.userData.targetCanvas = canvas
+  })
+
+  // Render all scenes using shared renderer and copy to individual canvases
+  requestAnimationFrame(() => {
+    thumbScenes.forEach((s, i) => {
+      if (s && s.userData.camera && s.userData.targetCanvas) {
+        sharedRenderer.render(s, s.userData.camera)
+        const ctx = s.userData.targetCanvas.getContext('2d')
+        ctx.drawImage(sharedCanvas, 0, 0)
+      }
+    })
+    console.log('Rendered', thumbScenes.length, 'thumbnails')
+    // Cleanup shared renderer
+    sharedRenderer.dispose()
   })
 }
 
