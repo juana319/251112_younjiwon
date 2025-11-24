@@ -971,6 +971,14 @@ function resetApp() {
 
 
 
+// Enable touch for OrbitControls
+controls.enableDamping = true
+controls.dampingFactor = 0.05
+controls.touches = {
+  ONE: THREE.TOUCH.ROTATE,
+  TWO: THREE.TOUCH.DOLLY_PAN
+}
+
 // Pointer move handler
 
 renderer.domElement.addEventListener('pointermove', (e) => {
@@ -997,57 +1005,74 @@ renderer.domElement.addEventListener('pointermove', (e) => {
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
 
-  // left button only
+  // left button only (mouse) or touch
+  if (e.pointerType === 'mouse' && e.button !== 0) return
 
-  if (e.button !== 0) return
+  // Store initial position for touch/click detection
+  const startX = e.clientX
+  const startY = e.clientY
+  const startTime = Date.now()
 
-  if (mode === 'create') {
-    placeBlock()
-    return
+  const onPointerUp = (upEvent) => {
+    const deltaX = Math.abs(upEvent.clientX - startX)
+    const deltaY = Math.abs(upEvent.clientY - startY)
+    const deltaTime = Date.now() - startTime
+    
+    // Only trigger if it's a tap/click (not a drag)
+    if (deltaX < 10 && deltaY < 10 && deltaTime < 300) {
+      if (mode === 'create') {
+        placeBlock()
+      } else if (mode === 'select') {
+        handleSelectClick(upEvent)
+      }
+    }
+    
+    renderer.domElement.removeEventListener('pointerup', onPointerUp)
   }
+  
+  renderer.domElement.addEventListener('pointerup', onPointerUp)
+})
 
-  if (mode === 'select') {
-    const hit = pointerToScene(e)
-    if (hit && hit.mesh) {
-      const nearest = getNearestVertex(hit.mesh, hit.point)
-      if (nearest) {
-        if (!selectState.pointA) {
-          selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
-          // push select action (store primitives)
-          pushAction({
-            type: 'select',
-            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
-            mode: mode
-          })
-          updateInstructions()
-          updateSelectionMarkers()
-        } else if (!selectState.pointB) {
-          selectState.pointB = { pos: nearest.clone(), meshId: hit.mesh.id }
-          pushAction({
-            type: 'select',
-            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: { x: selectState.pointB.pos.x, y: selectState.pointB.pos.y, z: selectState.pointB.pos.z, meshId: selectState.pointB.meshId } },
-            mode: mode
-          })
-          updateInstructions()
-          updateSelectionMarkers()
-          console.log('Selection complete:', selectState)
-        } else {
-          // reset and start over
-          selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
-          selectState.pointB = null
-          pushAction({
-            type: 'select',
-            selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
-            mode: mode
-          })
-          updateInstructions()
-          updateSelectionMarkers()
-        }
+function handleSelectClick(e) {
+  const hit = pointerToScene(e)
+  if (hit && hit.mesh) {
+    const nearest = getNearestVertex(hit.mesh, hit.point)
+    if (nearest) {
+      if (!selectState.pointA) {
+        selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
+        // push select action (store primitives)
+        pushAction({
+          type: 'select',
+          selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
+          mode: mode
+        })
+        updateInstructions()
+        updateSelectionMarkers()
+      } else if (!selectState.pointB) {
+        selectState.pointB = { pos: nearest.clone(), meshId: hit.mesh.id }
+        pushAction({
+          type: 'select',
+          selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: { x: selectState.pointB.pos.x, y: selectState.pointB.pos.y, z: selectState.pointB.pos.z, meshId: selectState.pointB.meshId } },
+          mode: mode
+        })
+        updateInstructions()
+        updateSelectionMarkers()
+        console.log('Selection complete:', selectState)
+      } else {
+        // reset and start over
+        selectState.pointA = { pos: nearest.clone(), meshId: hit.mesh.id }
+        selectState.pointB = null
+        pushAction({
+          type: 'select',
+          selectState: { pointA: { x: selectState.pointA.pos.x, y: selectState.pointA.pos.y, z: selectState.pointA.pos.z, meshId: selectState.pointA.meshId }, pointB: null },
+          mode: mode
+        })
+        updateInstructions()
+        updateSelectionMarkers()
       }
     }
   }
-
-})
+}
 
 
 
@@ -1355,7 +1380,7 @@ container.appendChild(controlPanel)
 const resultBox = document.createElement('div')
 resultBox.id = 'result-box'
 resultBox.style.position = 'absolute'
-resultBox.style.bottom = '8px'
+resultBox.style.top = '80px'
 resultBox.style.left = '8px'
 resultBox.style.padding = '8px 10px'
 resultBox.style.background = 'rgba(0,0,0,0.7)'
@@ -1461,7 +1486,7 @@ function updateInstructions() {
 
   if (mode === 'create') {
 
-    text = 'Click: 블록 배치 · Drag: 카메라 회전'
+    text = 'Click/Tap: 블록 배치 · Drag: 카메라 회전'
 
   } else if (mode === 'select') {
 
