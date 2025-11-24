@@ -1380,7 +1380,7 @@ container.appendChild(controlPanel)
 const resultBox = document.createElement('div')
 resultBox.id = 'result-box'
 resultBox.style.position = 'absolute'
-resultBox.style.top = '80px'
+resultBox.style.top = '50px'
 resultBox.style.left = '8px'
 resultBox.style.padding = '8px 10px'
 resultBox.style.background = 'rgba(0,0,0,0.7)'
