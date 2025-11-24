@@ -379,53 +379,51 @@ function computeOneExamplePath() {
 // Generate ALL shortest paths (recursive backtracking)
 function generateAllShortestPaths() {
   if (!selectState.pointA || !selectState.pointB) return []
-  
+
   const a = snapToGridVertex(selectState.pointA.pos)
   const b = snapToGridVertex(selectState.pointB.pos)
-  
+
   const dx = b.x - a.x
   const dy = b.y - a.y
   const dz = b.z - a.z
-  
-  // Generate all permutations of moves
-  const moves = []
-  for (let i = 0; i < Math.abs(dx); i++) moves.push([Math.sign(dx), 0, 0])
-  for (let i = 0; i < Math.abs(dy); i++) moves.push([0, Math.sign(dy), 0])
-  for (let i = 0; i < Math.abs(dz); i++) moves.push([0, 0, Math.sign(dz)])
-  
-  // Generate unique permutations
-  const permutations = []
-  const used = new Array(moves.length).fill(false)
-  
-  function backtrack(perm) {
-    if (perm.length === moves.length) {
-      permutations.push([...perm])
+
+  const sx = Math.sign(dx)
+  const sy = Math.sign(dy)
+  const sz = Math.sign(dz)
+
+  const nx = Math.abs(dx)
+  const ny = Math.abs(dy)
+  const nz = Math.abs(dz)
+
+  // Backtracking by remaining counts (multiset permutations) to produce exactly multinomial(nx,ny,nz) unique paths
+  const paths = []
+
+  function build(path, rx, ry, rz) {
+    if (rx === 0 && ry === 0 && rz === 0) {
+      paths.push(path.map(p => p.clone()))
       return
     }
-    for (let i = 0; i < moves.length; i++) {
-      if (!used[i]) {
-        used[i] = true
-        perm.push(moves[i])
-        backtrack(perm)
-        perm.pop()
-        used[i] = false
-      }
+    if (rx > 0) {
+      const last = path[path.length - 1]
+      path.push(new THREE.Vector3(last.x + sx, last.y, last.z))
+      build(path, rx - 1, ry, rz)
+      path.pop()
+    }
+    if (ry > 0) {
+      const last = path[path.length - 1]
+      path.push(new THREE.Vector3(last.x, last.y + sy, last.z))
+      build(path, rx, ry - 1, rz)
+      path.pop()
+    }
+    if (rz > 0) {
+      const last = path[path.length - 1]
+      path.push(new THREE.Vector3(last.x, last.y, last.z + sz))
+      build(path, rx, ry, rz - 1)
+      path.pop()
     }
   }
-  
-  backtrack([])
-  
-  // Convert permutations to paths
-  const paths = permutations.map(perm => {
-    const path = [a.clone()]
-    let current = a.clone()
-    for (const [sx, sy, sz] of perm) {
-      current = new THREE.Vector3(current.x + sx, current.y + sy, current.z + sz)
-      path.push(current.clone())
-    }
-    return path
-  })
-  
+
+  build([a.clone()], nx, ny, nz)
   return paths
 }
 
@@ -469,7 +467,7 @@ function showPathLine(path) {
 let pathVisuals = [] // store created visuals for cleanup
 
 function showAllPathsGrid(paths) {
-  // remove any previous thumbnails
+  // remove any previous overlay
   if (thumbsContainer) {
     thumbRenderers.forEach(r => {
       try { r.forceContextLoss && r.forceContextLoss() } catch(e) {}
@@ -485,46 +483,54 @@ function showAllPathsGrid(paths) {
 
   if (!paths || paths.length === 0) return
 
-  // create container DOM
+  // full-page overlay
   thumbsContainer = document.createElement('div')
-  thumbsContainer.style.position = 'absolute'
-  thumbsContainer.style.bottom = '8px'
-  thumbsContainer.style.right = '8px'
-  thumbsContainer.style.maxHeight = '40vh'
-  thumbsContainer.style.overflow = 'auto'
+  thumbsContainer.style.position = 'fixed'
+  thumbsContainer.style.top = '0'
+  thumbsContainer.style.left = '0'
+  thumbsContainer.style.width = '100%'
+  thumbsContainer.style.height = '100%'
+  thumbsContainer.style.background = '#ffffff' // white background
+  thumbsContainer.style.zIndex = '9999'
   thumbsContainer.style.display = 'grid'
+  thumbsContainer.style.gridAutoRows = 'min-content'
+  thumbsContainer.style.justifyContent = 'center'
+  thumbsContainer.style.alignContent = 'start' // align from top
+  thumbsContainer.style.padding = '24px'
+  thumbsContainer.style.overflow = 'auto'
   const cols = Math.ceil(Math.sqrt(paths.length))
-  thumbsContainer.style.gridTemplateColumns = `repeat(${cols}, 220px)`
-  thumbsContainer.style.gap = '8px'
-  container.appendChild(thumbsContainer)
+  thumbsContainer.style.gridTemplateColumns = `repeat(${cols}, minmax(200px, 1fr))`
+  thumbsContainer.style.gap = '12px'
+  document.body.appendChild(thumbsContainer)
 
   const colors = [
-    0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff,
-    0xff6600, 0x00ff99, 0x6600ff, 0xffcc00, 0xff0099, 0x00ccff
+    0xff0000, 0x00aa00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ccff,
+    0xff6600, 0x00aaff, 0x6600ff, 0xffcc00, 0xff0099, 0x0099cc
   ]
 
   paths.forEach((path, idx) => {
-    const w = 220, h = 160
+    const w = Math.min(420, Math.floor(window.innerWidth / cols) - 32)
+    const h = Math.floor(w * 0.66)
     const canvas = document.createElement('canvas')
     canvas.width = w
     canvas.height = h
     canvas.style.width = w + 'px'
     canvas.style.height = h + 'px'
-    canvas.style.background = '#222'
+    canvas.style.background = '#ffffff'
+    canvas.style.border = '1px solid #ddd'
     canvas.style.borderRadius = '6px'
-    canvas.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)'
     thumbsContainer.appendChild(canvas)
     thumbCanvases.push(canvas)
 
     // renderer
-    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
+    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     r.setSize(w, h)
-    r.setPixelRatio(1)
+    r.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     thumbRenderers.push(r)
 
     // mini scene
     const s = new THREE.Scene()
-    s.background = new THREE.Color(0x000000)
+    s.background = new THREE.Color(0xffffff)
     thumbScenes.push(s)
 
     // camera
@@ -533,15 +539,15 @@ function showAllPathsGrid(paths) {
     cam.lookAt(0, 0, 0)
 
     // lights
-    s.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.8))
+    s.add(new THREE.HemisphereLight(0xffffff, 0xdddddd, 0.8))
     const dl = new THREE.DirectionalLight(0xffffff, 0.6)
     dl.position.set(5, 10, 7)
     s.add(dl)
 
-    // semitransparent blocks (scaled down)
+    // slightly more opaque blocks (scaled down)
     blocks.forEach(b => {
       const geo = new THREE.BoxGeometry(blockSize * 0.6, blockSize * 0.6, blockSize * 0.6)
-      const mat = new THREE.MeshStandardMaterial({ color: 0xff8f00, transparent: true, opacity: 0.35 })
+      const mat = new THREE.MeshStandardMaterial({ color: 0xcc7a00, transparent: true, opacity: 0.55 })
       const m = new THREE.Mesh(geo, mat)
       m.position.copy(b.mesh.position)
       m.position.multiplyScalar(0.6)
@@ -549,17 +555,17 @@ function showAllPathsGrid(paths) {
       thumbObjects.push(m)
     })
 
-    // create tube path
+    // create thinner tube path
     const pts = path.map(p => new THREE.Vector3(p.x * 0.6, p.y * 0.6, p.z * 0.6))
     const curve = new THREE.CatmullRomCurve3(pts)
-    const tubeGeo = new THREE.TubeGeometry(curve, Math.max(pts.length * 6, 24), 0.08, 8, false)
+    const tubeGeo = new THREE.TubeGeometry(curve, Math.max(pts.length * 6, 24), 0.04, 8, false)
     const tubeMat = new THREE.MeshBasicMaterial({ color: colors[idx % colors.length] })
     const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat)
     s.add(tubeMesh)
     thumbObjects.push(tubeMesh)
 
     // A/B markers
-    const sphGeo = new THREE.SphereGeometry(0.12, 12, 12)
+    const sphGeo = new THREE.SphereGeometry(0.08, 12, 12)
     const aMesh = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0xff0000 }))
     const bMesh = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00 }))
     aMesh.position.copy(pts[0])
